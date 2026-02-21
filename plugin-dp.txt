@@ -1,4 +1,4 @@
-[plugin]
+[paper]
 axafkzone
 axgraves
 axinventoryrestore
@@ -12,7 +12,7 @@ nbtapi
 lagfixer
 packetevents
 placeholderapi
-purpur extras
+PurpurExtras
 quickshop-hikari
 terra
 tool-trims
@@ -21,98 +21,3 @@ viaversion
 simple voice chat
 luckperms
 
-[datapack]
----dir:0配方
-onestep
-more dyed
-redye terracotta
-redye glazed
-redye glass
-Re-Dye Concrete [PurpurPack]
-Re-Dye Concrete Powder [PurpurPack]
-smelt raw
-blasting smelts
-effective catus
-effective frog
-effective glass
-effective light
-joshs
-Tool Trims
-trim me 2
-transparent block
-
----dir:1机制
-banner bedsheets
-banner flag
-beacon base cooper
-beacon base raw cooper
-better endcities vanilla
-chef dream
-dragonkind
-gardeners
-illusioner Raid
-kaleidos
-Bubblellaneous
-wither
-wandering illusioner
-
----dir:2地形
-terralith
-incendium
-terratonic
-geophilic
-terraphilic
-arboria
-
----dir:3结构
-airship
-ashsailships
-castles
-cherry monastery
-deadly deadly
-dungeons+
-dungeons and
-dungeons and desert
-dungeons and jungle
-dungeons and nether
-dungeons and ocean
-dungeons and pillager
-dungeons and swamp
-earthblade
-explorify
-dangerous dungeons
-shapeless portals
-hopo mineshaft
-hopo ruin
-just another
-katter
-lukis crazy
-lukis grand
-minecraft movie
-Moss Ruins 
-necropolis
-neo enchant structure
-not enough trials
-Pale Formations
-Pale Garden Outpost
-astral
-STRAYED FATES: Forsaken
-qraftyfied: STRUCTURES
-qraftyfied: indust
-revmap
-structory
-structory tower
-structurepack
-wabi sabi
-Water Well's Updated
-yggdrasil
-
----dir:4附魔
-beyondenchant
-enchantments encore
-neo enchant
-
----dir:5进度
-blazeandcave
-BlazeandCave's Advancement Pack Enhanced Discoveries
-BlazeandCave's Advancements Pack Incendium Version

@@ -1,6 +1,12 @@
-plugins/
+paper/
 datapacks/
 libs/
 .venv/
 .idea/
 resourcepacks/
+spigot/
+fabric/
+neoforge/
+forge/
+purpur/
+sponge/

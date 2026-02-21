@@ -17,7 +17,7 @@ import logging
 TIMEOUT = 15
 MAX_RETRIES = 3
 CHUNK_SIZE = 8192
-USER_AGENT = 'ModrinthBulkDownloader/1.3'
+USER_AGENT = 'ModrinthBulkDownloader/1.4'
 
 # --- 颜色代码 (ANSI COLORS) ---
 COLOR_RED = "\033[91m"
@@ -27,15 +27,14 @@ COLOR_CYAN = "\033[96m"
 COLOR_RESET = "\033[0m"
 
 # --- 标识符与扩展名 (TOKENS & EXTENSIONS) ---
-TOKEN_CAT_PLUGIN = "plugin"
-TOKEN_CAT_DATAPACK = "datapack"
 TOKEN_DIR_MARKER = "---dir:"
 SUFFIX_CACHE = ".cache"
 EXT_DATAPACK = ".zip"
 EXT_PLUGIN = ".jar"
-DIR_PLUGINS = "plugins"
-DIR_DATAPACKS = "datapacks"
-PREFIX_FALLBACK = "[OD_{}]_"
+
+# --- 命名前缀 (PREFIXES) ---
+PREFIX_FALLBACK_VER = "[OD_{}]_"      # 版本降级前缀 (Outdated)
+PREFIX_FALLBACK_LDR = "[UC_{}]_"      # 加载器降级前缀 (Unconfirmed Compatibility)
 
 # --- API 端点 (URLS) ---
 URL_BASE = "https://api.modrinth.com/v2"
@@ -48,14 +47,18 @@ MSG_USAGE = "用法: ./downloadlist.py <packlist.txt> <mc_version>"
 MSG_FILE_MISSING = "错误: 找不到文件 '{file}'"
 MSG_CACHE_FOUND = "[*] 发现缓存文件 '{file}'，优先从此文件读取配置..."
 MSG_TARGET_VER = "目标 Minecraft 版本: {version}\n" + "-"*40
-MSG_RETRIEVE = "\n> 正在检索: {query}"
+MSG_RETRIEVE = "\n> 正在检索: {query} (目标环境: {loader})"
 MSG_HIT_EXACT = "  [*] 标识符精确命中: {title} ({id})"
 MSG_HIT_SEARCH = "  [*] 模糊搜索匹配到: {title} ({slug})"
 MSG_ERR_NOT_FOUND = "  [-] 未能在 Modrinth 找到有关该名称的匹配项。"
 MSG_ERR_NO_VERSIONS = "  [-] 无法获取该项目的版本列表。"
-MSG_OK_COMPATIBLE = "  [+] 找到兼容 {version} 的版本。"
-MSG_WARN_FALLBACK = "  [!] 缺失完美兼容版，回退至支持最高版本 {version} 的发布。"
-MSG_ERR_NO_VALID_EXT = "  [-] 该项目没有任何包含 {ext} 后缀且兼容或低于目标版本的发布。"
+
+MSG_OK_PERFECT = "  [+] 完美匹配: 兼容 {version} 且原生支持 {loader}。"
+MSG_WARN_LDR_ONLY = "  [!] 加载器降级: 找到 {version} 兼容版，但缺乏 {req_loader} 原生声明，回退至 {actual_loader}。"
+MSG_WARN_VER_ONLY = "  [!] 版本降级: 原生支持 {loader}，但缺失完美兼容版，回退至支持最高版本 {version} 的发布。"
+MSG_WARN_DOUBLE = "  [!] 双重降级: 缺失 {version} 兼容版及 {req_loader} 原生声明，回退至 {actual_loader} ({fb_version})。"
+MSG_ERR_NO_VALID = "  [-] 失败: 没有任何符合加载器条件 ({loader}) 且包含 {ext} 后缀的兼容发布。"
+
 MSG_DOWNLOADING = "  [↓] 正在下载: {filename} ..."
 MSG_OK_DOWNLOADED = "  [√] 已保存至 {filepath}"
 MSG_ERR_DOWNLOAD_RETRY = "  [!] 下载中断 ({err})，正在重新尝试 ({attempt}/{max_retries})..."
@@ -69,10 +72,8 @@ MSG_CACHE_SAVED = "\n[*] 缓存文件已更新并保存至: {file}"
 # ==========================================
 
 class ColorFormatter(logging.Formatter):
-    """自定义日志格式化器：根据级别自动上色，若输出被重定向则自动去除颜色"""
     def format(self, record):
         msg = super().format(record)
-        # sys.stdout.isatty() 用于判断是否在终端中运行。如果是重定向到文件，它将返回 False
         if not sys.stdout.isatty():
             return msg
             
@@ -88,7 +89,7 @@ class ColorFormatter(logging.Formatter):
         return msg
 
 logger = logging.getLogger("ModrinthDL")
-logger.setLevel(logging.INFO) # 可以在这里更改为 DEBUG 以查看更多底层信息
+logger.setLevel(logging.INFO)
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(ColorFormatter("%(message)s"))
 logger.addHandler(console_handler)
@@ -103,6 +104,27 @@ def parse_mc_version(v_str):
         return tuple(int(x) if x else 0 for x in matches[0])
     return (0, 0, 0)
 
+def evaluate_loader_compat(req_loader, avail_loaders):
+    """
+    评估加载器兼容性。返回: (是否兼容, 是否需要抛出降级警告, 实际采用的加载器名称)
+    """
+    req = req_loader.lower()
+    avail = [l.lower() for l in avail_loaders]
+
+    # 1. 严格一致匹配 (包含 Fabric, NeoForge, Forge 等一切明确指定的名称)
+    if req in avail:
+        return True, False, req
+
+    # 2. 跨加载器无损降级 (Purpur 请求 -> Paper 构建)
+    if req == "purpur" and "paper" in avail:
+        return True, False, "paper"
+
+    # 3. 跨加载器警告降级 (Paper/Purpur 请求 -> Spigot 构建)
+    if req in ["paper", "purpur"] and "spigot" in avail:
+        return True, True, "spigot"
+
+    return False, False, ""
+
 def fetch_json(url, quiet=False):
     req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
     for attempt in range(MAX_RETRIES):
@@ -110,8 +132,7 @@ def fetch_json(url, quiet=False):
             with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
                 return json.loads(response.read().decode('utf-8'))
         except urllib.error.HTTPError as e:
-            if not quiet:
-                logger.error(MSG_ERR_API_FAIL.format(url=url, err=f"HTTP {e.code}"))
+            if not quiet: logger.error(MSG_ERR_API_FAIL.format(url=url, err=f"HTTP {e.code}"))
             return None
         except Exception as e:
             if attempt < MAX_RETRIES - 1:
@@ -128,7 +149,6 @@ def main():
     list_file = sys.argv[1]
     target_mc_version = sys.argv[2]
     target_v_tuple = parse_mc_version(target_mc_version)
-
     cache_file = list_file + SUFFIX_CACHE
     
     if os.path.exists(cache_file):
@@ -143,7 +163,7 @@ def main():
     with open(target_file, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 
-    current_category = DIR_PLUGINS
+    current_loader = "datapack" # 默认 fallback
     current_dir = ""
     new_cache_lines = []
 
@@ -156,14 +176,9 @@ def main():
             new_cache_lines.append(line_raw)
             continue
 
+        # 解析分类 (形如 [paper], [fabric], [datapack])
         if line.startswith('[') and line.endswith(']'):
-            cat = line[1:-1].lower()
-            if cat == TOKEN_CAT_PLUGIN:
-                current_category = DIR_PLUGINS
-            elif cat == TOKEN_CAT_DATAPACK:
-                current_category = DIR_DATAPACKS
-            else:
-                current_category = f"{cat}s"
+            current_loader = line[1:-1].lower()
             current_dir = "" 
             new_cache_lines.append(line_raw)
             continue
@@ -173,7 +188,7 @@ def main():
             new_cache_lines.append(line_raw)
             continue
 
-        project_id = download_project(line, current_category, current_dir, target_mc_version, target_v_tuple)
+        project_id = download_project(line, current_loader, current_dir, target_mc_version, target_v_tuple)
         
         if project_id:
             new_cache_lines.append(project_id + "\n")
@@ -185,8 +200,8 @@ def main():
         
     logger.info(MSG_CACHE_SAVED.format(file=cache_file))
 
-def download_project(query, category, sub_dir, target_mc_version, target_v_tuple):
-    logger.info(MSG_RETRIEVE.format(query=query))
+def download_project(query, target_loader, sub_dir, target_mc_version, target_v_tuple):
+    logger.info(MSG_RETRIEVE.format(query=query, loader=target_loader))
     
     project_id = None
     versions = None
@@ -201,7 +216,6 @@ def download_project(query, category, sub_dir, target_mc_version, target_v_tuple
     else:
         search_url = URL_SEARCH.format(urllib.parse.quote(query))
         search_res = fetch_json(search_url)
-        
         if not search_res or not search_res.get('hits'):
             logger.error(MSG_ERR_NOT_FOUND)
             return None
@@ -215,50 +229,86 @@ def download_project(query, category, sub_dir, target_mc_version, target_v_tuple
         logger.error(MSG_ERR_NO_VERSIONS)
         return project_id 
 
-    required_ext = EXT_DATAPACK if category == DIR_DATAPACKS else EXT_PLUGIN
+    required_ext = EXT_DATAPACK if target_loader == 'datapack' else EXT_PLUGIN
     
-    exact_match = None
-    best_fallback = None
-    highest_fallback_v_tuple = (-1, -1, -1)
-    highest_fallback_v_str = ""
+    # 构建二维降级匹配矩阵
+    best_exact_ver_exact_ldr = None
+    best_exact_ver_warn_ldr = None
+    best_fb_ver_exact_ldr = None
+    best_fb_ver_warn_ldr = None
+    
+    highest_fb_v = (-1, -1, -1)
+    highest_fb_v_str = ""
+    highest_fb_v_warn = (-1, -1, -1)
+    highest_fb_v_warn_str = ""
 
     for v in versions:
         valid_files = [f for f in v['files'] if f['filename'].endswith(required_ext)]
-        if not valid_files:
-            continue
+        if not valid_files: continue
 
+        # 检查加载器是否兼容
+        avail_loaders = v.get('loaders', [])
+        is_compat, has_ldr_warning, actual_ldr = evaluate_loader_compat(target_loader, avail_loaders)
+        if not is_compat: continue
+
+        file_info = valid_files[0]
         game_versions = v['game_versions']
         
+        # 记录前缀组合
+        prefix_ldr = PREFIX_FALLBACK_LDR.format(actual_ldr) if has_ldr_warning else ""
+        
         if target_mc_version in game_versions:
-            exact_match = (v, valid_files[0])
-            break 
-            
-        for gv in game_versions:
-            gv_tuple = parse_mc_version(gv)
-            if gv_tuple < target_v_tuple:
-                if gv_tuple > highest_fallback_v_tuple:
-                    highest_fallback_v_tuple = gv_tuple
-                    highest_fallback_v_str = gv
-                    best_fallback = (v, valid_files[0])
+            if not has_ldr_warning:
+                # 找到完美版本（版本完美，加载器完美/无损），直接终止遍历
+                best_exact_ver_exact_ldr = (v, file_info, prefix_ldr, actual_ldr)
+                break 
+            elif not best_exact_ver_warn_ldr:
+                best_exact_ver_warn_ldr = (v, file_info, prefix_ldr, actual_ldr)
+        else:
+            # 记录历史降级版本
+            for gv in game_versions:
+                gv_tuple = parse_mc_version(gv)
+                if gv_tuple < target_v_tuple:
+                    prefix_ver = PREFIX_FALLBACK_VER.format(gv)
+                    combined_prefix = prefix_ver + prefix_ldr
+                    
+                    if not has_ldr_warning:
+                        if gv_tuple > highest_fb_v:
+                            highest_fb_v = gv_tuple
+                            highest_fb_v_str = gv
+                            best_fb_ver_exact_ldr = (v, file_info, combined_prefix, actual_ldr)
+                    else:
+                        if gv_tuple > highest_fb_v_warn:
+                            highest_fb_v_warn = gv_tuple
+                            highest_fb_v_warn_str = gv
+                            best_fb_ver_warn_ldr = (v, file_info, combined_prefix, actual_ldr)
 
-    prefix = ""
-    if exact_match:
-        selected_version, file_info = exact_match
-        logger.info(MSG_OK_COMPATIBLE.format(version=target_mc_version))
-    elif best_fallback:
-        selected_version, file_info = best_fallback
-        prefix = PREFIX_FALLBACK.format(highest_fallback_v_str)
-        # 这里使用 WARNING 等级，Formatter 会自动将其染成黄色
-        logger.warning(MSG_WARN_FALLBACK.format(version=highest_fallback_v_str))
+    # 按照优先级提取最终决定
+    final_decision = None
+    if best_exact_ver_exact_ldr:
+        final_decision = best_exact_ver_exact_ldr
+        logger.info(MSG_OK_PERFECT.format(version=target_mc_version, loader=final_decision[3]))
+    elif best_exact_ver_warn_ldr:
+        final_decision = best_exact_ver_warn_ldr
+        logger.warning(MSG_WARN_LDR_ONLY.format(version=target_mc_version, req_loader=target_loader, actual_loader=final_decision[3]))
+    elif best_fb_ver_exact_ldr:
+        final_decision = best_fb_ver_exact_ldr
+        logger.warning(MSG_WARN_VER_ONLY.format(loader=final_decision[3], version=highest_fb_v_str))
+    elif best_fb_ver_warn_ldr:
+        final_decision = best_fb_ver_warn_ldr
+        logger.warning(MSG_WARN_DOUBLE.format(version=target_mc_version, req_loader=target_loader, actual_loader=final_decision[3], fb_version=highest_fb_v_warn_str))
     else:
-        logger.error(MSG_ERR_NO_VALID_EXT.format(ext=required_ext))
+        logger.error(MSG_ERR_NO_VALID.format(loader=target_loader, ext=required_ext))
         return project_id
 
-    target_path = os.path.join(".", category)
+    # 动态确定基础保存目录（如果是 datapack 则存入 datapacks，否则直接使用加载器名称如 paper / fabric 作为目录）
+    base_category_dir = "datapacks" if target_loader == "datapack" else target_loader
+    target_path = os.path.join(".", base_category_dir)
     if sub_dir:
         target_path = os.path.join(target_path, sub_dir)
     os.makedirs(target_path, exist_ok=True)
 
+    selected_version, file_info, prefix, actual_ldr = final_decision
     filename = prefix + file_info['filename']
     download_url = file_info['url']
     file_path = os.path.join(target_path, filename)
@@ -271,20 +321,16 @@ def download_project(query, category, sub_dir, target_mc_version, target_v_tuple
             with urllib.request.urlopen(req, timeout=TIMEOUT) as response, open(file_path, 'wb') as out_file:
                 while True:
                     chunk = response.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
+                    if not chunk: break
                     out_file.write(chunk)
             logger.info(MSG_OK_DOWNLOADED.format(filepath=file_path))
             break 
-            
         except (socket.timeout, urllib.error.URLError, Exception) as e:
             if attempt < MAX_RETRIES - 1:
-                # 这里使用 ERROR 等级，Formatter 会自动将其染成红色
                 logger.error(MSG_ERR_DOWNLOAD_RETRY.format(err=e, attempt=attempt+1, max_retries=MAX_RETRIES))
             else:
                 logger.error(MSG_ERR_DOWNLOAD_FAIL.format(err=e))
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+                if os.path.exists(file_path): os.remove(file_path)
                     
     return project_id
 
